@@ -428,6 +428,11 @@ export function generateScatterHTML(
       canvas.style.width = W + 'px';
       canvas.style.height = H + 'px';
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      // Recompute the coordinate mapping whenever the canvas resizes. Without
+      // this, scale/xOff/yOff stay frozen at whatever the canvas size was on
+      // script load — when flex layout grew the canvas afterwards, every
+      // point got squashed into a tiny corner.
+      if (typeof xRange !== 'undefined') updateScale();
     }
     resize();
     window.addEventListener('resize', function() { resize(); });
@@ -446,10 +451,14 @@ export function generateScatterHTML(
     });
     var xRange = xMax - xMin || 1;
     var yRange = yMax - yMin || 1;
-    // Maintain aspect ratio
-    var scale = Math.min((W - 2*MARGIN) / xRange, (H - 2*MARGIN) / yRange);
-    var xOff = (W - xRange * scale) / 2;
-    var yOff = (H - yRange * scale) / 2;
+    var scale, xOff, yOff;
+    function updateScale() {
+      // Maintain aspect ratio while fitting the data range into the canvas.
+      scale = Math.min((W - 2*MARGIN) / xRange, (H - 2*MARGIN) / yRange);
+      xOff = (W - xRange * scale) / 2;
+      yOff = (H - yRange * scale) / 2;
+    }
+    updateScale();
 
     function sx(x) { return xOff + (x - xMin) * scale; }
     function sy(y) { return yOff + (y - yMin) * scale; }
