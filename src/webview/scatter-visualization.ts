@@ -700,20 +700,23 @@ export function generateScatterHTML(
     // does not chase the mouse) — otherwise points "run away" as the user
     // reaches for them. Releases via a short grace period after the cursor
     // leaves the lens bbox.
-    var FISHEYE_R = 220;         // lens radius in px — large enough to give cluster real room
-    var FISHEYE_K = 12.0;        // Sarkar-Brown distortion factor — aggressive center expansion
-    var FISHEYE_CLOSE = 24;      // px — points within this of mouse count as tightly overlapping
-    var FISHEYE_NEAR = 70;       // px — broader-radius activation when many points are clustered
+    var FISHEYE_R = 280;         // lens radius in px — generous so the spread has room
+    var FISHEYE_EXP = 0.3;       // power-curve exponent (lower = more aggressive center expansion)
+    var FISHEYE_MIN_SPREAD = 70; // px — every in-lens point ends up at least this far from center
+    var FISHEYE_CLOSE = 26;      // px — points within this of mouse count as tightly overlapping
+    var FISHEYE_NEAR = 80;       // px — broader-radius activation when many points are clustered
     var FISHEYE_NEAR_COUNT = 4;  // 4+ points within FISHEYE_NEAR also triggers activation
-    var FISHEYE_GRACE_MS = 250;  // grace period after pointer leaves lens
-    var FISHEYE_PAD = 40;        // px pad around lens before "leaving"
+    var FISHEYE_GRACE_MS = 280;  // grace period after pointer leaves lens
+    var FISHEYE_PAD = 50;        // px pad around lens before "leaving"
     var _fisheyeActive = false;
-    var _fisheyeCx = 0, _fisheyeCy = 0; // locked lens center
+    var _fisheyeCx = 0, _fisheyeCy = 0; // locked lens center (cluster centroid)
     var _fisheyeLeaveAt = 0;
     var _fisheyeStrength = 0;    // eased 0..1
     function _fisheyeRemap(dNorm) {
-      // Sarkar-Brown radial fisheye: maps [0,1] -> [0,1], expanding center.
-      return (1 + FISHEYE_K) * dNorm / (1 + FISHEYE_K * dNorm);
+      // Power curve — more aggressive at the center than Sarkar-Brown.
+      // Maps [0,1] -> [0,1]; edge stays at 1 so the spread blends smoothly
+      // into the un-fisheyed background.
+      return Math.pow(dNorm, FISHEYE_EXP);
     }
 
     // Per-repo smoothed Y for label fan-out animation (eased between frames).
@@ -744,6 +747,7 @@ export function generateScatterHTML(
       // run a grace period before releasing.
       if (!_fisheyeActive) {
         var fhClose = 0, fhNear = 0;
+        var fhSumX = 0, fhSumY = 0;
         var fhCloseD2 = FISHEYE_CLOSE * FISHEYE_CLOSE;
         var fhNearD2 = FISHEYE_NEAR * FISHEYE_NEAR;
         for (var fhi = 0; fhi < visPts.length; fhi++) {
@@ -752,13 +756,22 @@ export function generateScatterHTML(
           var fhdx = fhpx - _labelMouseX, fhdy = fhpy - _labelMouseY;
           var fhd2 = fhdx * fhdx + fhdy * fhdy;
           if (fhd2 < fhCloseD2) fhClose++;
-          if (fhd2 < fhNearD2) fhNear++;
-          if (fhClose >= 2 || fhNear >= FISHEYE_NEAR_COUNT) break;
+          if (fhd2 < fhNearD2) {
+            fhNear++;
+            fhSumX += fhpx;
+            fhSumY += fhpy;
+          }
         }
         if (fhClose >= 2 || fhNear >= FISHEYE_NEAR_COUNT) {
           _fisheyeActive = true;
-          _fisheyeCx = _labelMouseX;
-          _fisheyeCy = _labelMouseY;
+          // Lock the lens at the cluster centroid (not the cursor). When the
+          // user hovers the edge of a cluster the cluster sits on one side of
+          // the cursor — centering on the cursor would push every point
+          // outward in roughly the same direction (one-sided explosion).
+          // Centering on the cluster centroid makes the spread radially
+          // symmetric so the points fan out evenly in all directions.
+          _fisheyeCx = fhNear > 0 ? fhSumX / fhNear : _labelMouseX;
+          _fisheyeCy = fhNear > 0 ? fhSumY / fhNear : _labelMouseY;
           _fisheyeLeaveAt = 0;
         }
       } else {
@@ -787,12 +800,25 @@ export function generateScatterHTML(
         if (_fisheyeOn) {
           var fdx = px - _fisheyeCx, fdy = py - _fisheyeCy;
           var fd = Math.sqrt(fdx * fdx + fdy * fdy);
-          if (fd < FISHEYE_R && fd > 0.001) {
+          if (fd < FISHEYE_R) {
             var dNorm = fd / FISHEYE_R;
             var newD = _fisheyeRemap(dNorm) * FISHEYE_R;
+            // Floor the new distance so dense clusters can't keep points
+            // piled near the centroid — guarantees a visible ring.
+            if (newD < FISHEYE_MIN_SPREAD) newD = FISHEYE_MIN_SPREAD;
+            // Choose a unit direction. If the point sits exactly on the
+            // lens center, derive a stable angle from its original t-SNE
+            // position so it gets pushed somewhere consistent.
+            var ux, uy;
+            if (fd > 0.001) {
+              ux = fdx / fd; uy = fdy / fd;
+            } else {
+              var ang = Math.atan2(p.y || 0.0001, p.x || 0.0001);
+              ux = Math.cos(ang); uy = Math.sin(ang);
+            }
             var disp = (newD - fd) * _fisheyeStrength;
-            px += (fdx / fd) * disp;
-            py += (fdy / fd) * disp;
+            px += ux * disp;
+            py += uy * disp;
           }
         }
 
