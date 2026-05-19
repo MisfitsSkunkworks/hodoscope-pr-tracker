@@ -700,13 +700,13 @@ export function generateScatterHTML(
     // does not chase the mouse) — otherwise points "run away" as the user
     // reaches for them. Releases via a short grace period after the cursor
     // leaves the lens bbox.
-    var FISHEYE_R = 110;         // lens radius in px
-    var FISHEYE_K = 5.0;         // Sarkar-Brown distortion factor (higher = more spread)
-    var FISHEYE_CLOSE = 22;      // px — points within this of mouse count as tightly overlapping
-    var FISHEYE_NEAR = 55;       // px — broader-radius activation when many points are clustered
+    var FISHEYE_R = 220;         // lens radius in px — large enough to give cluster real room
+    var FISHEYE_K = 12.0;        // Sarkar-Brown distortion factor — aggressive center expansion
+    var FISHEYE_CLOSE = 24;      // px — points within this of mouse count as tightly overlapping
+    var FISHEYE_NEAR = 70;       // px — broader-radius activation when many points are clustered
     var FISHEYE_NEAR_COUNT = 4;  // 4+ points within FISHEYE_NEAR also triggers activation
     var FISHEYE_GRACE_MS = 250;  // grace period after pointer leaves lens
-    var FISHEYE_PAD = 30;        // px pad around lens before "leaving"
+    var FISHEYE_PAD = 40;        // px pad around lens before "leaving"
     var _fisheyeActive = false;
     var _fisheyeCx = 0, _fisheyeCy = 0; // locked lens center
     var _fisheyeLeaveAt = 0;
