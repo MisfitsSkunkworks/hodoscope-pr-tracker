@@ -632,40 +632,67 @@ export function generateScatterHTML(
     }
 
     // ===== DENSITY HEATMAP (Gaussian KDE) =====
+    // Density is an O(W*H*N) kernel density estimate — at 541 points it's
+    // ~230 million ops per frame, which drops the viz to <1 fps. The result
+    // only depends on which points are visible and the canvas size, so cache
+    // it and only recompute when those change.
+    var _densityCanvas = null;
+    var _densityCacheKey = '';
+
     function drawDensity() {
       var visPts = pts.filter(isVisible);
       if (visPts.length < 3) return;
-      var bw = scale * (xRange + yRange) * 0.03; // bandwidth
-      var gridSize = 3; // pixel step
-      var img = ctx.createImageData(Math.ceil(W / gridSize), Math.ceil(H / gridSize));
+      // Cheap fingerprint of the visible set + canvas dims. If anything in
+      // here changes (timeline scrub, filter, search, repo hide, resize),
+      // the density gets recomputed; otherwise we reuse the cached bitmap.
+      var key = visPts.length + ':' + visPts[0].id + ':' +
+        visPts[visPts.length - 1].id + ':' + W + 'x' + H;
+      if (key !== _densityCacheKey || !_densityCanvas) {
+        _densityCanvas = computeDensityCanvas(visPts);
+        _densityCacheKey = key;
+      }
+      ctx.drawImage(_densityCanvas, 0, 0, W, H);
+    }
 
-      for (var gy = 0; gy < img.height; gy++) {
-        for (var gx = 0; gx < img.width; gx++) {
+    function computeDensityCanvas(visPts) {
+      var bw = scale * (xRange + yRange) * 0.03; // bandwidth
+      var gridSize = 4; // pixel step (was 3; bumped for perf)
+      var imgW = Math.ceil(W / gridSize);
+      var imgH = Math.ceil(H / gridSize);
+      var img = ctx.createImageData(imgW, imgH);
+      var inv2bw2 = 1 / (2 * bw * bw);
+      var invN = 1 / visPts.length;
+      // Precompute the screen-space point positions once.
+      var spx = new Float64Array(visPts.length);
+      var spy = new Float64Array(visPts.length);
+      for (var i = 0; i < visPts.length; i++) {
+        spx[i] = sx(visPts[i].x);
+        spy[i] = sy(visPts[i].y);
+      }
+      for (var gy = 0; gy < imgH; gy++) {
+        var py = gy * gridSize;
+        for (var gx = 0; gx < imgW; gx++) {
           var px = gx * gridSize;
-          var py = gy * gridSize;
           var d = 0;
           for (var k = 0; k < visPts.length; k++) {
-            var dx = px - sx(visPts[k].x);
-            var dy = py - sy(visPts[k].y);
-            d += Math.exp(-(dx*dx + dy*dy) / (2*bw*bw));
+            var dx = px - spx[k];
+            var dy = py - spy[k];
+            d += Math.exp(-(dx * dx + dy * dy) * inv2bw2);
           }
-          d /= visPts.length;
-          var idx = (gy * img.width + gx) * 4;
-          // Map density to a blue-purple glow
+          d *= invN;
+          var idx = (gy * imgW + gx) * 4;
           var intensity = Math.min(d * 800, 1);
-          img.data[idx]     = Math.floor(99 * intensity);  // R
-          img.data[idx + 1] = Math.floor(110 * intensity); // G
-          img.data[idx + 2] = Math.floor(250 * intensity); // B
-          img.data[idx + 3] = Math.floor(40 * intensity);  // A
+          img.data[idx]     = Math.floor(99 * intensity);
+          img.data[idx + 1] = Math.floor(110 * intensity);
+          img.data[idx + 2] = Math.floor(250 * intensity);
+          img.data[idx + 3] = Math.floor(40 * intensity);
         }
       }
-
-      // Draw scaled
-      var tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = img.width;
-      tmpCanvas.height = img.height;
-      tmpCanvas.getContext('2d').putImageData(img, 0, 0);
-      ctx.drawImage(tmpCanvas, 0, 0, W, H);
+      var tmp = document.createElement('canvas');
+      tmp.width = imgW;
+      tmp.height = imgH;
+      tmp.getContext('2d').putImageData(img, 0, 0);
+      return tmp;
     }
 
     // ===== SHAPE HELPERS =====
