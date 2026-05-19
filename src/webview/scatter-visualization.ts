@@ -693,6 +693,32 @@ export function generateScatterHTML(
     var _hoveredLabelCluster = null; // labels being fanned out
     var _labelMouseX = 0, _labelMouseY = 0;
 
+    // ===== HOVER FISHEYE LENS =====
+    // When the cursor hovers over a cluster of overlapping points, lock a
+    // fisheye lens at that position and radially spread nearby points so they
+    // become individually selectable. The center is locked on activation (it
+    // does not chase the mouse) — otherwise points "run away" as the user
+    // reaches for them. Releases via a short grace period after the cursor
+    // leaves the lens bbox.
+    var FISHEYE_R = 110;         // lens radius in px
+    var FISHEYE_K = 5.0;         // Sarkar-Brown distortion factor (higher = more spread)
+    var FISHEYE_CLOSE = 22;      // px — points within this of mouse count as tightly overlapping
+    var FISHEYE_NEAR = 55;       // px — broader-radius activation when many points are clustered
+    var FISHEYE_NEAR_COUNT = 4;  // 4+ points within FISHEYE_NEAR also triggers activation
+    var FISHEYE_GRACE_MS = 250;  // grace period after pointer leaves lens
+    var FISHEYE_PAD = 30;        // px pad around lens before "leaving"
+    var _fisheyeActive = false;
+    var _fisheyeCx = 0, _fisheyeCy = 0; // locked lens center
+    var _fisheyeLeaveAt = 0;
+    var _fisheyeStrength = 0;    // eased 0..1
+    function _fisheyeRemap(dNorm) {
+      // Sarkar-Brown radial fisheye: maps [0,1] -> [0,1], expanding center.
+      return (1 + FISHEYE_K) * dNorm / (1 + FISHEYE_K * dNorm);
+    }
+
+    // Per-repo smoothed Y for label fan-out animation (eased between frames).
+    var _labelDisplayY = {};
+
     function draw() {
       // Background
       ctx.fillStyle = '#0a0a0f';
@@ -710,8 +736,66 @@ export function generateScatterHTML(
 
       // Draw points
       var visPts = pts.filter(isVisible);
+
+      // --- Fisheye lens activation / persistence ---
+      // Activate when 2+ points sit within FISHEYE_CLOSE of the mouse (overlap
+      // condition). Once active, the center is locked. Stay active while the
+      // pointer is within FISHEYE_R + FISHEYE_PAD of the locked center; then
+      // run a grace period before releasing.
+      if (!_fisheyeActive) {
+        var fhClose = 0, fhNear = 0;
+        var fhCloseD2 = FISHEYE_CLOSE * FISHEYE_CLOSE;
+        var fhNearD2 = FISHEYE_NEAR * FISHEYE_NEAR;
+        for (var fhi = 0; fhi < visPts.length; fhi++) {
+          var fhp = visPts[fhi];
+          var fhpx = sx(fhp.x), fhpy = sy(fhp.y);
+          var fhdx = fhpx - _labelMouseX, fhdy = fhpy - _labelMouseY;
+          var fhd2 = fhdx * fhdx + fhdy * fhdy;
+          if (fhd2 < fhCloseD2) fhClose++;
+          if (fhd2 < fhNearD2) fhNear++;
+          if (fhClose >= 2 || fhNear >= FISHEYE_NEAR_COUNT) break;
+        }
+        if (fhClose >= 2 || fhNear >= FISHEYE_NEAR_COUNT) {
+          _fisheyeActive = true;
+          _fisheyeCx = _labelMouseX;
+          _fisheyeCy = _labelMouseY;
+          _fisheyeLeaveAt = 0;
+        }
+      } else {
+        var flDx = _labelMouseX - _fisheyeCx, flDy = _labelMouseY - _fisheyeCy;
+        var flD2 = flDx * flDx + flDy * flDy;
+        var flLimit = FISHEYE_R + FISHEYE_PAD;
+        if (flD2 > flLimit * flLimit) {
+          if (!_fisheyeLeaveAt) _fisheyeLeaveAt = Date.now();
+          if (Date.now() - _fisheyeLeaveAt > FISHEYE_GRACE_MS) {
+            _fisheyeActive = false;
+          }
+        } else {
+          _fisheyeLeaveAt = 0;
+        }
+      }
+
+      var fhTarget = _fisheyeActive ? 1 : 0;
+      _fisheyeStrength += (fhTarget - _fisheyeStrength) * 0.18;
+      if (_fisheyeStrength < 0.001) _fisheyeStrength = 0;
+      var _fisheyeOn = _fisheyeStrength > 0.001;
+
       visPts.forEach(function(p) {
         var px = sx(p.x), py = sy(p.y);
+
+        // Fisheye displacement: push points radially outward from locked center.
+        if (_fisheyeOn) {
+          var fdx = px - _fisheyeCx, fdy = py - _fisheyeCy;
+          var fd = Math.sqrt(fdx * fdx + fdy * fdy);
+          if (fd < FISHEYE_R && fd > 0.001) {
+            var dNorm = fd / FISHEYE_R;
+            var newD = _fisheyeRemap(dNorm) * FISHEYE_R;
+            var disp = (newD - fd) * _fisheyeStrength;
+            px += (fdx / fd) * disp;
+            py += (fdy / fd) * disp;
+          }
+        }
+
         var r = radius(p);
         var isH = hovered && hovered.id === p.id;
         var dimmed = highlightedRepo && p.repoName !== highlightedRepo;
@@ -880,7 +964,15 @@ export function generateScatterHTML(
       labels.forEach(function(l) {
         var isActive = highlightedRepo === l.repo;
         var isFanned = l._fanY !== undefined;
-        var drawY = isFanned ? l._fanY : l.cy;
+        // Smoothed Y: lerp from current display position toward the target
+        // (fanned or natural). Keeps state per-repo across frames so labels
+        // glide in and out of the fan instead of snapping.
+        var targetY = isFanned ? l._fanY : l.cy;
+        var prevY = _labelDisplayY[l.repo];
+        if (prevY === undefined) prevY = l.cy;
+        var drawY = prevY + (targetY - prevY) * 0.22;
+        if (Math.abs(drawY - targetY) < 0.25) drawY = targetY;
+        _labelDisplayY[l.repo] = drawY;
         var lx = l.cx - l.tw/2, ly = drawY - 8, lw = l.tw, lh = 16;
 
         // Background pill
