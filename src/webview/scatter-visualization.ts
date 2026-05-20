@@ -1055,44 +1055,89 @@ export function generateScatterHTML(
         fanGroup._bbox = { x0: bbX0, x1: bbX1, y0: bbY0, y1: bbY1 };
       }
 
-      labels.forEach(function(l) {
-        var isActive = highlightedRepo === l.repo;
-        var isFanned = l._fanY !== undefined;
-
-        // Determine target position. Priority: fisheye > existing label fan
-        // > natural cluster centroid. Fisheye wins because the lens is a
-        // strong, deliberate user gesture; the vertical fan is a fallback
-        // for cases where the lens isn't active but labels still overlap.
-        var targetX = l.cx;
-        var targetY = isFanned ? l._fanY : l.cy;
-        var inFisheye = false;
+      // ---- Pass 1: compute target positions for every label ----
+      // Each label's target is the fisheye-displaced position when the lens
+      // is engaged, else the existing label-fan position, else natural.
+      var labelTargets = new Array(labels.length);
+      for (var liT = 0; liT < labels.length; liT++) {
+        var lT = labels[liT];
+        var isFannedT = lT._fanY !== undefined;
+        var tX = lT.cx;
+        var tY = isFannedT ? lT._fanY : lT.cy;
+        var inFE = false;
         if (_fisheyeOn) {
-          var fdx = l.cx - _fisheyeCx, fdy = l.cy - _fisheyeCy;
-          var fd = Math.sqrt(fdx * fdx + fdy * fdy);
-          if (fd < FISHEYE_R) {
-            inFisheye = true;
-            var dNorm = fd / FISHEYE_R;
-            var newD = _fisheyeRemap(dNorm) * FISHEYE_R;
-            if (newD < FISHEYE_MIN_SPREAD) newD = FISHEYE_MIN_SPREAD;
-            var ux, uy;
-            if (fd > 0.001) {
-              ux = fdx / fd; uy = fdy / fd;
+          var fdxT = lT.cx - _fisheyeCx, fdyT = lT.cy - _fisheyeCy;
+          var fdT = Math.sqrt(fdxT * fdxT + fdyT * fdyT);
+          if (fdT < FISHEYE_R) {
+            inFE = true;
+            var dNormT = fdT / FISHEYE_R;
+            var newDT = _fisheyeRemap(dNormT) * FISHEYE_R;
+            if (newDT < FISHEYE_MIN_SPREAD) newDT = FISHEYE_MIN_SPREAD;
+            var uxT, uyT;
+            if (fdT > 0.001) {
+              uxT = fdxT / fdT; uyT = fdyT / fdT;
             } else {
-              // Stable angle derived from the repo name so the label always
-              // gets pushed somewhere consistent when it sits exactly on
-              // the lens center.
-              var h = 0;
-              for (var hi = 0; hi < l.repo.length; hi++) {
-                h = ((h * 31) + l.repo.charCodeAt(hi)) | 0;
+              var hT = 0;
+              for (var hiT = 0; hiT < lT.repo.length; hiT++) {
+                hT = ((hT * 31) + lT.repo.charCodeAt(hiT)) | 0;
               }
-              var ang = (h & 0x7fffffff) * 0.0001;
-              ux = Math.cos(ang); uy = Math.sin(ang);
+              var angT = (hT & 0x7fffffff) * 0.0001;
+              uxT = Math.cos(angT); uyT = Math.sin(angT);
             }
-            var disp = (newD - fd) * _fisheyeStrength;
-            targetX = l.cx + ux * disp;
-            targetY = l.cy + uy * disp;
+            var dispT = (newDT - fdT) * _fisheyeStrength;
+            tX = lT.cx + uxT * dispT;
+            tY = lT.cy + uyT * dispT;
           }
         }
+        labelTargets[liT] = { x: tX, y: tY, inFisheye: inFE };
+      }
+
+      // ---- Pass 2: resolve label-pair overlaps when fisheye is engaged ----
+      // Iteratively push overlapping label rectangles apart along the axis
+      // of least penetration. With ~50 labels and a few iterations this is
+      // negligible cost, and it guarantees every label is selectable in
+      // fisheye mode.
+      if (_fisheyeOn) {
+        var padX = 3, padY = 2;
+        for (var iter = 0; iter < 12; iter++) {
+          var anyMoved = false;
+          for (var i = 0; i < labels.length; i++) {
+            var ai = labelTargets[i];
+            var ahw = labels[i].tw / 2 + padX;
+            var ahh = 8 + padY;
+            for (var j = i + 1; j < labels.length; j++) {
+              var bj = labelTargets[j];
+              var bhw = labels[j].tw / 2 + padX;
+              var bhh = 8 + padY;
+              var dx = bj.x - ai.x;
+              var dy = bj.y - ai.y;
+              var penX = (ahw + bhw) - Math.abs(dx);
+              var penY = (ahh + bhh) - Math.abs(dy);
+              if (penX > 0 && penY > 0) {
+                if (penX < penY) {
+                  var shiftX = penX / 2 + 0.1;
+                  if (dx >= 0) { ai.x -= shiftX; bj.x += shiftX; }
+                  else { ai.x += shiftX; bj.x -= shiftX; }
+                } else {
+                  var shiftY = penY / 2 + 0.1;
+                  if (dy >= 0) { ai.y -= shiftY; bj.y += shiftY; }
+                  else { ai.y += shiftY; bj.y -= shiftY; }
+                }
+                anyMoved = true;
+              }
+            }
+          }
+          if (!anyMoved) break;
+        }
+      }
+
+      // ---- Pass 3: smooth-lerp toward (overlap-resolved) targets and draw
+      labels.forEach(function(l, idx) {
+        var isActive = highlightedRepo === l.repo;
+        var isFanned = l._fanY !== undefined;
+        var t = labelTargets[idx];
+        var targetX = t.x, targetY = t.y;
+        var inFisheye = t.inFisheye;
 
         // 2D smoothed lerp keyed per-repo, so labels glide rather than snap
         // between fanned / fisheye'd / natural states.
