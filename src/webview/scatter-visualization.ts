@@ -755,8 +755,10 @@ export function generateScatterHTML(
       return Math.pow(dNorm, FISHEYE_EXP);
     }
 
-    // Per-repo smoothed Y for label fan-out animation (eased between frames).
-    var _labelDisplayY = {};
+    // Per-repo smoothed (x, y) for label fan-out + fisheye animation. Labels
+    // are now subject to both effects, so we need 2D smoothing instead of
+    // just the previous Y-only state.
+    var _labelDisplay = {};
 
     function draw() {
       // Background
@@ -776,11 +778,29 @@ export function generateScatterHTML(
       // Draw points
       var visPts = pts.filter(isVisible);
 
+      // Compute repo centroids up-front. Used both for fisheye activation
+      // (so dense label regions where the underlying PRs are scattered
+      // elsewhere still trigger the lens) and reused later for label
+      // rendering.
+      var repoCentroids = {};
+      var labelsBuilt = false;
+      if (showRepoLabels || highlightedRepo) {
+        visPts.forEach(function(p) {
+          if (!repoCentroids[p.repoName]) {
+            repoCentroids[p.repoName] = { sx: 0, sy: 0, n: 0, color: p._repoColor };
+          }
+          repoCentroids[p.repoName].sx += sx(p.x);
+          repoCentroids[p.repoName].sy += sy(p.y);
+          repoCentroids[p.repoName].n++;
+        });
+      }
+
       // --- Fisheye lens activation / persistence ---
-      // Activate when 2+ points sit within FISHEYE_CLOSE of the mouse (overlap
-      // condition). Once active, the center is locked. Stay active while the
-      // pointer is within FISHEYE_R + FISHEYE_PAD of the locked center; then
-      // run a grace period before releasing.
+      // Activate when 2+ points or labels sit within FISHEYE_CLOSE of the
+      // mouse, OR FISHEYE_NEAR_COUNT+ within FISHEYE_NEAR. Once active, the
+      // center locks at the centroid of the local cluster. Stay active while
+      // the pointer is within FISHEYE_R + FISHEYE_PAD of the locked center;
+      // then run a grace period before releasing.
       if (!_fisheyeActive) {
         var fhClose = 0, fhNear = 0;
         var fhSumX = 0, fhSumY = 0;
@@ -797,6 +817,24 @@ export function generateScatterHTML(
             fhSumX += fhpx;
             fhSumY += fhpy;
           }
+        }
+        // Labels count too — important for regions where many repo centroids
+        // pile up but the individual PRs are spread elsewhere.
+        if (showRepoLabels || highlightedRepo) {
+          Object.keys(repoCentroids).forEach(function(repo) {
+            var rc = repoCentroids[repo];
+            if (rc.n < 2) return;
+            var lcx = rc.sx / rc.n;
+            var lcy = rc.sy / rc.n - 18;
+            var ldx = lcx - _labelMouseX, ldy = lcy - _labelMouseY;
+            var ld2 = ldx * ldx + ldy * ldy;
+            if (ld2 < fhCloseD2) fhClose++;
+            if (ld2 < fhNearD2) {
+              fhNear++;
+              fhSumX += lcx;
+              fhSumY += lcy;
+            }
+          });
         }
         if (fhClose >= 2 || fhNear >= FISHEYE_NEAR_COUNT) {
           _fisheyeActive = true;
@@ -920,14 +958,8 @@ export function generateScatterHTML(
       if (!showRepoLabels && !highlightedRepo) {
         // Skip labels but keep animation loop
       } else {
-      // Always show repo labels (even when colored by repo)
-      var repoCentroids = {};
-      visPts.forEach(function(p) {
-        if (!repoCentroids[p.repoName]) repoCentroids[p.repoName] = { sx: 0, sy: 0, n: 0, color: p._repoColor };
-        repoCentroids[p.repoName].sx += sx(p.x);
-        repoCentroids[p.repoName].sy += sy(p.y);
-        repoCentroids[p.repoName].n++;
-      });
+      // repoCentroids was already computed before the fisheye activation
+      // check, so we reuse it here.
 
       ctx.font = '9px "JetBrains Mono", "Fira Code", monospace';
       ctx.textAlign = 'center';
@@ -1026,16 +1058,55 @@ export function generateScatterHTML(
       labels.forEach(function(l) {
         var isActive = highlightedRepo === l.repo;
         var isFanned = l._fanY !== undefined;
-        // Smoothed Y: lerp from current display position toward the target
-        // (fanned or natural). Keeps state per-repo across frames so labels
-        // glide in and out of the fan instead of snapping.
+
+        // Determine target position. Priority: fisheye > existing label fan
+        // > natural cluster centroid. Fisheye wins because the lens is a
+        // strong, deliberate user gesture; the vertical fan is a fallback
+        // for cases where the lens isn't active but labels still overlap.
+        var targetX = l.cx;
         var targetY = isFanned ? l._fanY : l.cy;
-        var prevY = _labelDisplayY[l.repo];
-        if (prevY === undefined) prevY = l.cy;
-        var drawY = prevY + (targetY - prevY) * 0.22;
+        var inFisheye = false;
+        if (_fisheyeOn) {
+          var fdx = l.cx - _fisheyeCx, fdy = l.cy - _fisheyeCy;
+          var fd = Math.sqrt(fdx * fdx + fdy * fdy);
+          if (fd < FISHEYE_R) {
+            inFisheye = true;
+            var dNorm = fd / FISHEYE_R;
+            var newD = _fisheyeRemap(dNorm) * FISHEYE_R;
+            if (newD < FISHEYE_MIN_SPREAD) newD = FISHEYE_MIN_SPREAD;
+            var ux, uy;
+            if (fd > 0.001) {
+              ux = fdx / fd; uy = fdy / fd;
+            } else {
+              // Stable angle derived from the repo name so the label always
+              // gets pushed somewhere consistent when it sits exactly on
+              // the lens center.
+              var h = 0;
+              for (var hi = 0; hi < l.repo.length; hi++) {
+                h = ((h * 31) + l.repo.charCodeAt(hi)) | 0;
+              }
+              var ang = (h & 0x7fffffff) * 0.0001;
+              ux = Math.cos(ang); uy = Math.sin(ang);
+            }
+            var disp = (newD - fd) * _fisheyeStrength;
+            targetX = l.cx + ux * disp;
+            targetY = l.cy + uy * disp;
+          }
+        }
+
+        // 2D smoothed lerp keyed per-repo, so labels glide rather than snap
+        // between fanned / fisheye'd / natural states.
+        var prev = _labelDisplay[l.repo];
+        if (!prev) prev = { x: l.cx, y: l.cy };
+        var drawX = prev.x + (targetX - prev.x) * 0.22;
+        var drawY = prev.y + (targetY - prev.y) * 0.22;
+        if (Math.abs(drawX - targetX) < 0.25) drawX = targetX;
         if (Math.abs(drawY - targetY) < 0.25) drawY = targetY;
-        _labelDisplayY[l.repo] = drawY;
-        var lx = l.cx - l.tw/2, ly = drawY - 8, lw = l.tw, lh = 16;
+        _labelDisplay[l.repo] = { x: drawX, y: drawY };
+        // Treat as "fanned" for visual styling whenever the label has been
+        // displaced — either by the vertical fan or by the fisheye lens.
+        isFanned = isFanned || inFisheye;
+        var lx = drawX - l.tw/2, ly = drawY - 8, lw = l.tw, lh = 16;
 
         // Background pill
         var bgAlpha = isFanned ? 'ee' : 'bb';
@@ -1051,7 +1122,7 @@ export function generateScatterHTML(
 
         // Text
         ctx.fillStyle = isActive ? l.color + 'ff' : l.color + (isFanned ? 'ff' : 'cc');
-        ctx.fillText(l.repo, l.cx, drawY + 3);
+        ctx.fillText(l.repo, drawX, drawY + 3);
 
         // Store hit area
         _repoLabelHits.push({ repo: l.repo, x: lx, y: ly, w: lw, h: lh });
