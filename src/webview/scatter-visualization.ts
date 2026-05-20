@@ -498,9 +498,21 @@ export function generateScatterHTML(
       viewOffsetX = fx - (fx - viewOffsetX) * (newScale / oldScale);
       viewOffsetY = fy - (fy - viewOffsetY) * (newScale / oldScale);
       viewScale = newScale;
+      // The fisheye lens center is locked in screen coords; once the view
+      // transform moves, the old center no longer matches anything visible
+      // on screen. Drop the lens so the user re-engages it fresh at the new
+      // zoom level. Each depth gets its own lens, independent of others.
+      onViewChanged();
     }
 
-    function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; }
+    function onViewChanged() {
+      _fisheyeActive = false;
+      _fisheyeLeaveAt = 0;
+      // _fisheyeStrength eases back to 0 naturally over the next ~10 frames,
+      // so the lens collapses smoothly instead of snapping.
+    }
+
+    function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; onViewChanged(); }
 
     // ===== POINT SIZE by event count =====
     var maxEvt = Math.max.apply(null, pts.map(function(p) { return p.eventCount; })) || 1;
@@ -1336,6 +1348,7 @@ export function generateScatterHTML(
           viewOffsetY += e.movementY || 0;
           _labelMouseX = mx; _labelMouseY = my;
           tip.classList.remove('vis');
+          onViewChanged();
           return;
         }
       }
