@@ -1229,6 +1229,11 @@ export function generateScatterHTML(
       // ---- Pass 3: smooth-lerp toward (overlap-resolved) targets and draw
       labels.forEach(function(l, idx) {
         var isActive = highlightedRepo === l.repo;
+        // When a repo is selected, hide every other label so the user can
+        // focus on the selected one without the surrounding labels still
+        // competing for attention. Click the selected label again to
+        // deselect (existing click toggle) and the other labels come back.
+        if (highlightedRepo && !isActive) return;
         var isFanned = l._fanY !== undefined;
         var t = labelTargets[idx];
         var targetX = t.x, targetY = t.y;
