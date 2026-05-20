@@ -1000,11 +1000,17 @@ export function generateScatterHTML(
         }
 
         var shape = p.status; // 'repo_created' | 'work_item' | other (→ circle)
-        // Outer glow halo: drawImage of a cached sprite per color, scaled
-        // to the desired halo radius. Roughly 10x faster than rebuilding
-        // the gradient every frame.
-        var glowMult = isHighlit ? 1.5 : 1;
-        var haloR = r * (isH ? 4 : 2.5) * glowMult;
+        // Outer glow halo via cached sprite. Default halo is small (1.4x
+        // point radius) so 500+ points don't pile up massive overdraw —
+        // even with the sprite cache and viewport culling, the previous
+        // 2.5x default was burning GPU fill rate and kept the live site
+        // at ~30 fps despite JS work being only 1ms/frame. Hovered and
+        // highlighted points still get a big bright glow so the user's
+        // focus stands out.
+        var haloR;
+        if (isH) haloR = r * 4;
+        else if (isHighlit) haloR = r * 2.8;
+        else haloR = r * 1.4;
         var haloColor = isHighlit ? p._repoColor : p.color;
         var halo = getHaloSprite(haloColor);
         ctx.drawImage(halo, px - haloR, py - haloR, haloR * 2, haloR * 2);
