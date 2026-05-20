@@ -508,8 +508,17 @@ export function generateScatterHTML(
     function onViewChanged() {
       _fisheyeActive = false;
       _fisheyeLeaveAt = 0;
-      // _fisheyeStrength eases back to 0 naturally over the next ~10 frames,
-      // so the lens collapses smoothly instead of snapping.
+      // Snap strength to 0 instead of easing — _fisheyeCx/_fisheyeCy are
+      // locked in screen coords at activation and become stale once the
+      // view transform moves. Easing would keep applying displacement from
+      // the wrong anchor for ~10 frames after the zoom/pan, carrying the
+      // old-depth lens visibly into the new depth.
+      _fisheyeStrength = 0;
+      // Drop smoothed label positions so labels snap to the new-zoom
+      // canonical layout instead of gliding from the old-zoom fisheye'd
+      // positions (which would look exactly like a fisheye effect being
+      // applied across the transition).
+      _labelDisplay = {};
     }
 
     function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; onViewChanged(); }
