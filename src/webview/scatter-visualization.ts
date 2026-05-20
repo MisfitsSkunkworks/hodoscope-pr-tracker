@@ -498,9 +498,30 @@ export function generateScatterHTML(
       viewOffsetX = fx - (fx - viewOffsetX) * (newScale / oldScale);
       viewOffsetY = fy - (fy - viewOffsetY) * (newScale / oldScale);
       viewScale = newScale;
+      // The fisheye lens center is locked in screen coords; once the view
+      // transform moves, the old center no longer matches anything visible
+      // on screen. Drop the lens so the user re-engages it fresh at the new
+      // zoom level. Each depth gets its own lens, independent of others.
+      onViewChanged();
     }
 
-    function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; }
+    function onViewChanged() {
+      _fisheyeActive = false;
+      _fisheyeLeaveAt = 0;
+      // Snap strength to 0 instead of easing — _fisheyeCx/_fisheyeCy are
+      // locked in screen coords at activation and become stale once the
+      // view transform moves. Easing would keep applying displacement from
+      // the wrong anchor for ~10 frames after the zoom/pan, carrying the
+      // old-depth lens visibly into the new depth.
+      _fisheyeStrength = 0;
+      // Drop smoothed label positions so labels snap to the new-zoom
+      // canonical layout instead of gliding from the old-zoom fisheye'd
+      // positions (which would look exactly like a fisheye effect being
+      // applied across the transition).
+      _labelDisplay = {};
+    }
+
+    function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; onViewChanged(); }
 
     // ===== POINT SIZE by event count =====
     var maxEvt = Math.max.apply(null, pts.map(function(p) { return p.eventCount; })) || 1;
@@ -1336,6 +1357,7 @@ export function generateScatterHTML(
           viewOffsetY += e.movementY || 0;
           _labelMouseX = mx; _labelMouseY = my;
           tip.classList.remove('vis');
+          onViewChanged();
           return;
         }
       }
