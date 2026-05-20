@@ -247,6 +247,19 @@ export function generateScatterHTML(
     .toggle-labels:hover { border-color: #636EFA; color: #e0e0e0; }
     .toggle-labels.on { background: #636EFA18; border-color: #636EFA; color: #636EFA; }
     .toggle-labels .ico { font-size: 12px; }
+    .zoom-ctl {
+      position: absolute; bottom: 12px; left: 110px; z-index: 10;
+      display: flex; gap: 4px;
+    }
+    .zoom-btn {
+      width: 28px; height: 28px; padding: 0;
+      background: #0d1117; border: 1px solid #30363d; color: #8b949e;
+      border-radius: 4px; cursor: pointer; font-size: 14px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .zoom-btn:hover { border-color: #636EFA; color: #e0e0e0; }
+    .zoom-btn:active { background: #636EFA18; }
 
     /* Timeline bar */
     .timeline-bar {
@@ -373,6 +386,7 @@ export function generateScatterHTML(
     <div class="canvas-wrap">
       ${hasData ? '<canvas id="c"></canvas>' : '<div class="empty"><div style="font-size:36px;opacity:0.2;">&#9678;</div><div>No PR traces</div></div>'}
       ${hasData ? '<button class="toggle-labels on" id="toggle-labels"><span class="ico">&#9781;</span> Labels</button>' : ''}
+      ${hasData ? '<div class="zoom-ctl"><button class="zoom-btn" id="zoom-in" title="Zoom in (scroll wheel up)">+</button><button class="zoom-btn" id="zoom-out" title="Zoom out (scroll wheel down)">&minus;</button><button class="zoom-btn" id="zoom-reset" title="Reset zoom + pan (double-click canvas)">&#11203;</button></div>' : ''}
       <div class="tooltip" id="tip"></div>
       <div class="detail" id="detail">
         <button class="detail-close" id="detail-close">&times;</button>
@@ -460,8 +474,33 @@ export function generateScatterHTML(
     }
     updateScale();
 
-    function sx(x) { return xOff + (x - xMin) * scale; }
-    function sy(y) { return yOff + (y - yMin) * scale; }
+    // ===== ZOOM + PAN VIEW TRANSFORM =====
+    // sx/sy return final screen coordinates so hit testing, fisheye, and all
+    // downstream geometry "just work" at any zoom level. The density cache
+    // uses sxWorld/syWorld so its key stays invariant under zoom; the cached
+    // bitmap is drawn with a manual ctx transform at render time.
+    var viewScale = 1;
+    var viewOffsetX = 0;
+    var viewOffsetY = 0;
+    var VIEW_MIN = 0.4, VIEW_MAX = 10;
+
+    function sxWorld(x) { return xOff + (x - xMin) * scale; }
+    function syWorld(y) { return yOff + (y - yMin) * scale; }
+    function sx(x) { return sxWorld(x) * viewScale + viewOffsetX; }
+    function sy(y) { return syWorld(y) * viewScale + viewOffsetY; }
+
+    // Zoom around a focal point (screen-space x, y).
+    function zoomAt(fx, fy, factor) {
+      var oldScale = viewScale;
+      var newScale = Math.max(VIEW_MIN, Math.min(VIEW_MAX, oldScale * factor));
+      if (newScale === oldScale) return;
+      // Keep the world point under the cursor stationary across the zoom.
+      viewOffsetX = fx - (fx - viewOffsetX) * (newScale / oldScale);
+      viewOffsetY = fy - (fy - viewOffsetY) * (newScale / oldScale);
+      viewScale = newScale;
+    }
+
+    function resetView() { viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; }
 
     // ===== POINT SIZE by event count =====
     var maxEvt = Math.max.apply(null, pts.map(function(p) { return p.eventCount; })) || 1;
@@ -642,16 +681,21 @@ export function generateScatterHTML(
     function drawDensity() {
       var visPts = pts.filter(isVisible);
       if (visPts.length < 3) return;
-      // Cheap fingerprint of the visible set + canvas dims. If anything in
-      // here changes (timeline scrub, filter, search, repo hide, resize),
-      // the density gets recomputed; otherwise we reuse the cached bitmap.
+      // Cheap fingerprint of the visible set + canvas dims. Notably this
+      // does NOT include the view transform — the bitmap is rendered in
+      // world coordinates and drawn with a manual ctx transform, so zoom
+      // and pan don't invalidate the cache.
       var key = visPts.length + ':' + visPts[0].id + ':' +
         visPts[visPts.length - 1].id + ':' + W + 'x' + H;
       if (key !== _densityCacheKey || !_densityCanvas) {
         _densityCanvas = computeDensityCanvas(visPts);
         _densityCacheKey = key;
       }
+      ctx.save();
+      ctx.translate(viewOffsetX, viewOffsetY);
+      ctx.scale(viewScale, viewScale);
       ctx.drawImage(_densityCanvas, 0, 0, W, H);
+      ctx.restore();
     }
 
     function computeDensityCanvas(visPts) {
@@ -662,12 +706,14 @@ export function generateScatterHTML(
       var img = ctx.createImageData(imgW, imgH);
       var inv2bw2 = 1 / (2 * bw * bw);
       var invN = 1 / visPts.length;
-      // Precompute the screen-space point positions once.
+      // Precompute world-space (un-zoomed) point positions once. World
+      // coords here so the cached bitmap stays valid under zoom/pan; the
+      // bitmap is drawn with a manual ctx transform at render time.
       var spx = new Float64Array(visPts.length);
       var spy = new Float64Array(visPts.length);
       for (var i = 0; i < visPts.length; i++) {
-        spx[i] = sx(visPts[i].x);
-        spy[i] = sy(visPts[i].y);
+        spx[i] = sxWorld(visPts[i].x);
+        spy[i] = syWorld(visPts[i].y);
       }
       for (var gy = 0; gy < imgH; gy++) {
         var py = gy * gridSize;
@@ -1177,11 +1223,63 @@ export function generateScatterHTML(
       requestAnimationFrame(draw);
     }
 
+    // ===== ZOOM + PAN INPUT =====
+    var _mouseDownX = 0, _mouseDownY = 0;
+    var _isPanning = false; // true once mousedown has moved past the threshold
+
+    canvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      var rect = canvas.getBoundingClientRect();
+      var fx = e.clientX - rect.left, fy = e.clientY - rect.top;
+      // Standard convention: wheel up (negative deltaY) zooms in.
+      var factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      zoomAt(fx, fy, factor);
+    }, { passive: false });
+
+    canvas.addEventListener('mousedown', function(e) {
+      if (e.button !== 0) return; // primary button only
+      var rect = canvas.getBoundingClientRect();
+      _mouseDownX = e.clientX - rect.left;
+      _mouseDownY = e.clientY - rect.top;
+      _isPanning = false;
+    });
+
+    window.addEventListener('mouseup', function() {
+      // Reset the cursor; the click handler reads _isPanning to decide
+      // whether to suppress the click action that ordinarily follows
+      // mouseup. We clear the flag in the click handler itself so the
+      // ordering (mouseup -> click) is well-defined.
+      if (_isPanning) canvas.style.cursor = 'crosshair';
+    });
+
+    canvas.addEventListener('dblclick', function() {
+      resetView();
+    });
+
     // ===== HOVER =====
     var tip = document.getElementById('tip');
     canvas.addEventListener('mousemove', function(e) {
       var rect = canvas.getBoundingClientRect();
       var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+      // Pan handling: while the primary button is held, drag past 5px to
+      // enter pan mode. Once panning, the rest of the hover/tooltip path
+      // is skipped this frame.
+      if (e.buttons & 1) {
+        var dxp = mx - _mouseDownX, dyp = my - _mouseDownY;
+        if (!_isPanning && (dxp * dxp + dyp * dyp) > 25) {
+          _isPanning = true;
+          canvas.style.cursor = 'grabbing';
+        }
+        if (_isPanning) {
+          viewOffsetX += e.movementX || 0;
+          viewOffsetY += e.movementY || 0;
+          _labelMouseX = mx; _labelMouseY = my;
+          tip.classList.remove('vis');
+          return;
+        }
+      }
+
       _labelMouseX = mx; _labelMouseY = my;
       hovered = null;
       // Check repo label hover for cursor
@@ -1230,6 +1328,13 @@ export function generateScatterHTML(
     var detail = document.getElementById('detail');
     var detailBody = document.getElementById('detail-body');
     canvas.addEventListener('click', function(e) {
+      if (_isPanning) {
+        // The mouseup that just ended a pan also fires click — swallow it
+        // so the user's pan gesture doesn't accidentally toggle a repo
+        // highlight or open the detail panel.
+        _isPanning = false;
+        return;
+      }
       var rect = canvas.getBoundingClientRect();
       var mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
@@ -1309,6 +1414,16 @@ export function generateScatterHTML(
     });
 
     // Toggle repo labels
+    // Wire up zoom controls. The +/- buttons zoom around the canvas center
+    // so the user sees a predictable in/out instead of jumping to some
+    // off-center focal point; wheel zoom uses the cursor position.
+    var zoomInBtn = document.getElementById('zoom-in');
+    var zoomOutBtn = document.getElementById('zoom-out');
+    var zoomResetBtn = document.getElementById('zoom-reset');
+    if (zoomInBtn) zoomInBtn.addEventListener('click', function() { zoomAt(W / 2, H / 2, 1.25); });
+    if (zoomOutBtn) zoomOutBtn.addEventListener('click', function() { zoomAt(W / 2, H / 2, 1 / 1.25); });
+    if (zoomResetBtn) zoomResetBtn.addEventListener('click', function() { resetView(); });
+
     var toggleBtn = document.getElementById('toggle-labels');
     if (toggleBtn) {
       toggleBtn.addEventListener('click', function() {
