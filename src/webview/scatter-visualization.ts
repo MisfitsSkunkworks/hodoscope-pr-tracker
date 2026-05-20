@@ -1094,12 +1094,13 @@ export function generateScatterHTML(
 
       // ---- Pass 2: resolve label-pair overlaps when fisheye is engaged ----
       // Iteratively push overlapping label rectangles apart along the axis
-      // of least penetration. With ~50 labels and a few iterations this is
-      // negligible cost, and it guarantees every label is selectable in
-      // fisheye mode.
+      // of least penetration. Greedy pairwise relaxation; up to 40 passes,
+      // with a small overshoot per push so cascading chains of overlaps
+      // don't get stuck in tied configurations.
       if (_fisheyeOn) {
-        var padX = 3, padY = 2;
-        for (var iter = 0; iter < 12; iter++) {
+        var padX = 5, padY = 3;
+        var overshoot = 0.8;
+        for (var iter = 0; iter < 40; iter++) {
           var anyMoved = false;
           for (var i = 0; i < labels.length; i++) {
             var ai = labelTargets[i];
@@ -1115,13 +1116,25 @@ export function generateScatterHTML(
               var penY = (ahh + bhh) - Math.abs(dy);
               if (penX > 0 && penY > 0) {
                 if (penX < penY) {
-                  var shiftX = penX / 2 + 0.1;
+                  var shiftX = penX / 2 + overshoot;
                   if (dx >= 0) { ai.x -= shiftX; bj.x += shiftX; }
-                  else { ai.x += shiftX; bj.x -= shiftX; }
+                  else if (dx < 0) { ai.x += shiftX; bj.x -= shiftX; }
+                  else {
+                    // dx == 0: tie-break using repo-name hash so the pair
+                    // splits in a stable direction instead of oscillating.
+                    var h = labels[i].repo.length - labels[j].repo.length;
+                    if (h >= 0) { ai.x -= shiftX; bj.x += shiftX; }
+                    else { ai.x += shiftX; bj.x -= shiftX; }
+                  }
                 } else {
-                  var shiftY = penY / 2 + 0.1;
-                  if (dy >= 0) { ai.y -= shiftY; bj.y += shiftY; }
-                  else { ai.y += shiftY; bj.y -= shiftY; }
+                  var shiftY = penY / 2 + overshoot;
+                  if (dy > 0) { ai.y -= shiftY; bj.y += shiftY; }
+                  else if (dy < 0) { ai.y += shiftY; bj.y -= shiftY; }
+                  else {
+                    var h2 = labels[i].repo.length - labels[j].repo.length;
+                    if (h2 >= 0) { ai.y -= shiftY; bj.y += shiftY; }
+                    else { ai.y += shiftY; bj.y -= shiftY; }
+                  }
                 }
                 anyMoved = true;
               }
